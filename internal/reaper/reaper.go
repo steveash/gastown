@@ -159,8 +159,11 @@ const (
 	DefaultBatchSize = 100
 	// DefaultAlertThreshold is the open-wisp count above which callers should
 	// surface a warning. Sized above the natural steady-state for the current
-	// dog/deacon emit rate (~23 wisps/h × 24h TTL ≈ 550). See hq-57jr8.
-	DefaultAlertThreshold = 800
+	// dog/deacon emit rate (~23 wisps/h × 24h TTL ≈ 550) PLUS bursts from large
+	// mountain runs (observed ~1250 open wisps post-31-task mountain), so the
+	// alert only fires on a genuine runaway leak, not normal activity volume.
+	// See hq-57jr8, hq-8hkfc.
+	DefaultAlertThreshold = 2500
 )
 
 // ValidateDBName returns an error if the database name is unsafe.
