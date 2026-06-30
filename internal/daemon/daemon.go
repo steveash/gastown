@@ -2237,8 +2237,12 @@ func (d *Daemon) escalateMissingRigBead(rigName, beadID string, err error) {
 		"To recover: bd create --id %s '<rigname>' -t task -p 2 -l 'gt:rig' (or restore from backup). "+
 		"Error: %v", beadID, beadID, err)
 
-	// Use exec to call gt escalate (matching the pattern in cmd/prime.go)
-	cmd := exec.Command("gt", "escalate", "--severity", "high", detail)
+	// Use exec to call gt escalate (matching the pattern in cmd/prime.go).
+	// --fingerprint dedups repeated escalations for the same rig into a single
+	// alert: isRigOperational() runs every cycle, so without this a missing bead
+	// floods the inbox (observed 72 escalations for 3 rigs in ~12min). (hq-3ct1 follow-up)
+	cmd := exec.Command("gt", "escalate", "--severity", "high",
+		"--fingerprint", "missing-rig-bead-"+rigName, detail)
 	if err := cmd.Run(); err != nil {
 		d.logger.Printf("escalation failed for missing rig bead %s: %v", beadID, err)
 	}
