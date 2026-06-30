@@ -2185,7 +2185,14 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 			}
 		}
 	} else {
-		// Log when rig bead lookup fails - this helps debug transient Dolt issues
+		// Distinguish between missing rig bead and transient Dolt errors
+		if isIssueNotFoundErr(err) {
+			// Rig identity bead is missing — escalate immediately
+			d.logger.Printf("ERROR: Rig identity bead %s is missing (deleted or orphaned)", rigBeadID)
+			d.escalateMissingRigBead(rigName, rigBeadID, err)
+			return false, "rig identity bead is missing"
+		}
+		// Log when rig bead lookup fails due to transient Dolt issues
 		// FAIL-SAFE: When we can't verify docked status (Dolt down, network issue, etc.),
 		// assume the rig is NOT operational. This prevents wasting API credits starting
 		// witnesses that might be docked. Better to delay work than burn credits unnecessarily.
@@ -2209,6 +2216,32 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	}
 
 	return true, ""
+}
+
+// isIssueNotFoundErr checks if an error indicates a missing issue (rig bead).
+func isIssueNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no issue found") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "issue not found")
+}
+
+// escalateMissingRigBead sends a HIGH escalation when a rig identity bead is missing.
+func (d *Daemon) escalateMissingRigBead(rigName, beadID string, err error) {
+	detail := fmt.Sprintf("Rig identity bead %s is missing (issue not found). "+
+		"This may have been deleted during a bd rename-prefix --repair operation or by the reaper. "+
+		"ConvoyManager cannot feed work to this rig until the bead is restored. "+
+		"To recover: bd create --id %s '<rigname>' -t task -p 2 -l 'gt:rig' (or restore from backup). "+
+		"Error: %v", beadID, beadID, err)
+
+	// Use exec to call gt escalate (matching the pattern in cmd/prime.go)
+	cmd := exec.Command("gt", "escalate", "--severity", "high", detail)
+	if err := cmd.Run(); err != nil {
+		d.logger.Printf("escalation failed for missing rig bead %s: %v", beadID, err)
+	}
 }
 
 // processLifecycleRequests checks for and processes lifecycle requests.

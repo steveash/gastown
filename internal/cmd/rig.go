@@ -1885,14 +1885,24 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 	// Header
 	fmt.Printf("%s\n", style.Bold.Render(rigName))
 
-	// Operational state
-	opState, opSource := getRigOperationalState(townRoot, rigName)
-	if opState == "OPERATIONAL" {
-		fmt.Printf("  Status: %s\n", style.Success.Render(opState))
-	} else if opState == "PARKED" {
-		fmt.Printf("  Status: %s (%s)\n", style.Warning.Render(opState), opSource)
-	} else if opState == "DOCKED" {
-		fmt.Printf("  Status: %s (%s)\n", style.Dim.Render(opState), opSource)
+	// Check for missing rig identity bead (critical condition)
+	rigBeadMissing := isRigIdentityBeadMissing(townRoot, rigName)
+	if rigBeadMissing {
+		fmt.Printf("  Status: %s\n", style.Error.Render("CRITICAL: Identity bead missing"))
+		fmt.Printf("  %s ConvoyManager cannot feed work to this rig until the identity bead is restored.\n",
+			style.Error.Render("⚠"))
+		fmt.Printf("  To recover: bd create --id <prefix>-rig-%s '<rigname>' -t task -p 2 -l 'gt:rig'\n", rigName)
+		fmt.Println()
+	} else {
+		// Operational state
+		opState, opSource := getRigOperationalState(townRoot, rigName)
+		if opState == "OPERATIONAL" {
+			fmt.Printf("  Status: %s\n", style.Success.Render(opState))
+		} else if opState == "PARKED" {
+			fmt.Printf("  Status: %s (%s)\n", style.Warning.Render(opState), opSource)
+		} else if opState == "DOCKED" {
+			fmt.Printf("  Status: %s (%s)\n", style.Dim.Render(opState), opSource)
+		}
 	}
 
 	fmt.Printf("  Path: %s\n", r.Path)
@@ -2387,6 +2397,38 @@ func getRigOperationalState(townRoot, rigName string) (state string, source stri
 
 	// Default: operational
 	return "OPERATIONAL", "default"
+}
+
+// isRigIdentityBeadMissing checks if the rig identity bead exists.
+// Returns true if the bead is missing (issue not found).
+func isRigIdentityBeadMissing(townRoot, rigName string) bool {
+	rigPath := filepath.Join(townRoot, rigName)
+	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
+	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
+
+	// Try to get prefix from rig config.json, fall back to rigs.json registry
+	var prefix string
+	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
+		prefix = rigCfg.Beads.Prefix
+	} else {
+		// Fall back to registry (mayor/rigs.json) when config.json is missing
+		prefix = config.GetRigPrefix(townRoot, rigName)
+	}
+
+	if prefix == "" {
+		return false // Can't determine prefix, assume bead exists
+	}
+
+	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
+	_, err := bd.Show(rigBeadID)
+	if err == nil {
+		return false // Bead exists
+	}
+
+	// Check if error is specifically "issue not found"
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "issue not found") ||
+		strings.Contains(msg, "not found")
 }
 
 // ensureHooksBase creates ~/.gt/hooks-base.json from current defaults if it
