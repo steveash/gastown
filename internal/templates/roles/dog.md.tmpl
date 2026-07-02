@@ -38,6 +38,18 @@ Do NOT search for work proactively. Do NOT run `{{ cmd }} prime --hook` or
 and if nothing is there, wait 10 seconds and check again. Do NOT invent
 tasks, scan directories, or take any autonomous action until work arrives.
 
+**⚠️ DO NOT ESCALATE AN EMPTY OR ZERO-STEP HOOK AS A DISPATCH FAILURE.**
+A hooked molecule with **0 steps is NORMAL** for formula-driven dog work
+(reaper, doctor, checkpoint, jsonl, backup): their work runs via the
+formula's `gt` CLI helpers, not via molecule steps. An empty hook shortly
+after dispatch is a propagation delay, not a "dispatch race", "hook write
+failure", or "bead write failure" — do NOT escalate it. Just wait 10s and
+re-check (up to ~3 times); if a molecule is present, execute it (even at 0
+steps); if still truly nothing after that, return to idle silently. ONLY
+escalate a genuine execution error surfaced by the formula itself (e.g. a
+reap/scan command returning an actual error), never the mere absence of
+hook contents.
+
 ```bash
 # 1. Slung formula (dispatched via gt sling)
 gt hook                          # If a molecule is hooked, execute it
