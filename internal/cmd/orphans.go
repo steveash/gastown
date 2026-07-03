@@ -178,6 +178,12 @@ func init() {
 	orphansCmd.AddCommand(orphansKillCmd)
 	orphansCmd.AddCommand(orphansProcsCmd)
 
+	orphansRecoverCmd.Flags().BoolVar(&orphansRecoverDryRun, "dry-run", false, "Show what would be resubmitted without doing it")
+	orphansRecoverCmd.Flags().BoolVar(&orphansRecoverAll, "all", false, "Recover all orphan branches (required when more than one is found and no polecat is named)")
+	orphansRecoverCmd.Flags().BoolVar(&orphansRecoverForce, "force", false, "Recover clean commits even if the worktree has additional uncommitted changes")
+	// --rig is inherited from orphansCmd's persistent flag.
+	orphansCmd.AddCommand(orphansRecoverCmd)
+
 	rootCmd.AddCommand(orphansCmd)
 }
 
@@ -293,6 +299,179 @@ func runOrphans(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+var (
+	orphansRecoverDryRun bool
+	orphansRecoverAll    bool
+	orphansRecoverForce  bool
+)
+
+// orphansRecoverCmd resubmits committed-but-unsubmitted polecat work to the
+// merge queue. This closes the "committed-but-not-submitted" gap (esim-mku):
+// a polecat that crashes AFTER `git commit` but BEFORE `gt done` leaves an
+// unmerged branch that no actor reintegrates. Recovery reuses the tested
+// `gt sling --branch` resume path: a fresh polecat is spawned ON the orphan
+// branch, sees the committed work, and runs `gt done` normally -> the MR
+// enters the merge queue via the same code path a live polecat would use.
+var orphansRecoverCmd = &cobra.Command{
+	Use:   "recover [<polecat>]",
+	Short: "Resubmit committed-but-unsubmitted polecat work to the merge queue",
+	Long: `Recover orphaned polecat work — committed to a branch but never submitted
+to the merge queue (polecat died after 'git commit' but before 'gt done').
+
+For each orphan branch, this resubmits via 'gt sling <issue> <rig> --branch <branch>',
+which spawns a fresh polecat on the existing branch; it runs 'gt done' to submit
+the already-committed work to the merge queue. No work is lost.
+
+Only branches whose worktree is CLEAN (no uncommitted changes) and whose issue
+ID is derivable from the branch name are auto-recovered; others are reported for
+manual handling (uncommitted changes must be committed first — use --force to
+recover clean commits anyway, ignoring the uncommitted remainder).
+
+Examples:
+  gt orphans recover                 # Recover all orphan branches in the current rig
+  gt orphans recover furiosa         # Recover only polecat 'furiosa'
+  gt orphans recover --rig=gastown   # Target a specific rig
+  gt orphans recover --dry-run       # Show what would be resubmitted, do nothing`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runOrphansRecover,
+}
+
+func runOrphansRecover(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	var rigName string
+	var r *rig.Rig
+	if orphansRig != "" {
+		_, r, err = getRig(orphansRig)
+		if err != nil {
+			return err
+		}
+		rigName = orphansRig
+	} else {
+		rigName, r, err = findCurrentRig(townRoot)
+		if err != nil {
+			return fmt.Errorf("not in a rig directory. Use --rig <name> to specify the target rig, or run from within a rig directory")
+		}
+	}
+
+	var targetPolecat string
+	if len(args) == 1 {
+		targetPolecat = args[0]
+	}
+
+	defaultBranch := r.DefaultBranch()
+	branches, skipped, err := findOrphanPolecatBranches(r.Path, rigName, defaultBranch)
+	if err != nil {
+		return fmt.Errorf("scanning polecat worktrees: %w", err)
+	}
+
+	// Filter to the requested polecat (if any) and to recoverable branches.
+	recoverable, unrecoverable := classifyOrphanBranches(branches, targetPolecat, orphansRecoverForce)
+
+	if targetPolecat == "" && !orphansRecoverAll && len(recoverable) > 1 && !orphansRecoverDryRun {
+		fmt.Printf("%s %d recoverable orphan branch(es) found. Re-run with --all to recover all, or name one:\n\n", style.Warning.Render("⚠"), len(recoverable))
+		for _, b := range recoverable {
+			fmt.Printf("  %s  %s (%d commit(s): %s)\n", style.Bold.Render(b.Polecat), b.Branch, b.AheadCount, b.LatestSubject)
+		}
+		fmt.Printf("\n  gt orphans recover --all        # recover all of the above\n")
+		fmt.Printf("  gt orphans recover <polecat>    # recover just one\n")
+		return nil
+	}
+
+	if len(recoverable) == 0 {
+		fmt.Printf("%s No recoverable orphan branches found", style.Bold.Render("✓"))
+		if targetPolecat != "" {
+			fmt.Printf(" for polecat %q", targetPolecat)
+		}
+		fmt.Println()
+		reportUnrecoverable(unrecoverable, skipped)
+		return nil
+	}
+
+	var recovered, failed int
+	for _, b := range recoverable {
+		info := parseBranchName(b.Branch)
+		if orphansRecoverDryRun {
+			fmt.Printf("%s would resubmit %s (%s, %d commit(s)) via: gt sling %s %s --branch %s\n",
+				style.Dim.Render("[dry-run]"), info.Issue, b.Polecat, b.AheadCount, info.Issue, rigName, b.Branch)
+			continue
+		}
+
+		fmt.Printf("%s Resubmitting %s (%s, %d commit(s) ahead)...\n",
+			style.Bold.Render("↻"), style.Bold.Render(info.Issue), b.Polecat, b.AheadCount)
+
+		// Reuse the tested resume path exactly as a human would run it.
+		slingCmd := exec.Command("gt", "sling", info.Issue, rigName, "--branch", b.Branch)
+		slingCmd.Dir = townRoot
+		out, slingErr := slingCmd.CombinedOutput()
+		if slingErr != nil {
+			failed++
+			fmt.Printf("  %s sling failed: %v\n%s\n", style.Warning.Render("✗"), slingErr, indentLines(string(out), "    "))
+			continue
+		}
+		recovered++
+		fmt.Printf("  %s resubmitted to merge queue on branch %s\n", style.Success.Render("✓"), b.Branch)
+	}
+
+	if !orphansRecoverDryRun {
+		fmt.Printf("\n%s Recovered %d, failed %d\n", style.Bold.Render("Summary:"), recovered, failed)
+	}
+	reportUnrecoverable(unrecoverable, skipped)
+	return nil
+}
+
+// classifyOrphanBranches splits detected orphan branches into those that can be
+// auto-recovered (clean worktree + derivable issue ID) and human-readable
+// descriptions of those that cannot. If targetPolecat is non-empty, only that
+// polecat's branches are considered. If force is true, branches with
+// uncommitted changes are still treated as recoverable (their committed part).
+func classifyOrphanBranches(branches []OrphanBranch, targetPolecat string, force bool) (recoverable []OrphanBranch, unrecoverable []string) {
+	for _, b := range branches {
+		if targetPolecat != "" && b.Polecat != targetPolecat {
+			continue
+		}
+		info := parseBranchName(b.Branch)
+		if info.Issue == "" {
+			unrecoverable = append(unrecoverable, fmt.Sprintf("%s (%s): cannot derive issue ID from branch name", b.Polecat, b.Branch))
+			continue
+		}
+		if b.HasUncommitted && !force {
+			unrecoverable = append(unrecoverable, fmt.Sprintf("%s (%s): has uncommitted changes — commit them first, or use --force to recover the committed part only", b.Polecat, info.Issue))
+			continue
+		}
+		recoverable = append(recoverable, b)
+	}
+	return recoverable, unrecoverable
+}
+
+// reportUnrecoverable prints branches/polecats that could not be auto-recovered.
+func reportUnrecoverable(unrecoverable []string, skipped []skippedPolecat) {
+	if len(unrecoverable) > 0 {
+		fmt.Printf("\n%s %d branch(es) need manual handling:\n", style.Warning.Render("⚠"), len(unrecoverable))
+		for _, u := range unrecoverable {
+			fmt.Printf("  %s\n", u)
+		}
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("\n%s Skipped %d polecat(s) due to scan errors:\n", style.Warning.Render("⚠"), len(skipped))
+		for _, s := range skipped {
+			fmt.Printf("  %s: %s\n", s.Polecat, s.Err)
+		}
+	}
+}
+
+// indentLines prefixes every line of s with the given indent.
+func indentLines(s, indent string) string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return ""
+	}
+	return indent + strings.ReplaceAll(s, "\n", "\n"+indent)
 }
 
 // OrphanBranch represents a polecat worktree with unmerged work.

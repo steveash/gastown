@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -258,5 +259,55 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestClassifyOrphanBranches verifies the recover-eligibility rules (esim-mku):
+// clean worktree + derivable issue ID → recoverable; uncommitted (without
+// --force) or unparseable branch → reported for manual handling.
+func TestClassifyOrphanBranches(t *testing.T) {
+	branches := []OrphanBranch{
+		{Polecat: "furiosa", Branch: "polecat/furiosa/ahs-6kx@mq01", AheadCount: 1},              // clean, parseable → recoverable
+		{Polecat: "nux", Branch: "polecat/nux/ahs-0yv@mq02", AheadCount: 2, HasUncommitted: true}, // dirty → not (unless force)
+		{Polecat: "toast", Branch: "polecat/toast-1699999999", AheadCount: 1},                     // modern 2-part branch → no issue id derivable
+		{Polecat: "slit", Branch: "polecat/slit/ahs-abc.3@mq03", AheadCount: 1},                   // subtask issue id → recoverable
+	}
+
+	// Default (no force): furiosa + slit recoverable; nux held for uncommitted.
+	rec, unrec := classifyOrphanBranches(branches, "", false)
+	recNames := map[string]bool{}
+	for _, b := range rec {
+		recNames[b.Polecat] = true
+	}
+	if !recNames["furiosa"] || !recNames["slit"] {
+		t.Errorf("expected furiosa and slit recoverable, got %v", recNames)
+	}
+	if recNames["nux"] {
+		t.Errorf("nux has uncommitted changes and should NOT be recoverable without --force")
+	}
+	foundNuxHeld := false
+	for _, u := range unrec {
+		if strings.Contains(u, "nux") && strings.Contains(u, "uncommitted") {
+			foundNuxHeld = true
+		}
+	}
+	if !foundNuxHeld {
+		t.Errorf("expected nux reported as held for uncommitted changes; unrecoverable=%v", unrec)
+	}
+
+	// With --force: nux becomes recoverable too.
+	recF, _ := classifyOrphanBranches(branches, "", true)
+	forceNames := map[string]bool{}
+	for _, b := range recF {
+		forceNames[b.Polecat] = true
+	}
+	if !forceNames["nux"] {
+		t.Errorf("with --force, nux should be recoverable; got %v", forceNames)
+	}
+
+	// Targeting a single polecat filters the rest out.
+	recOne, _ := classifyOrphanBranches(branches, "furiosa", false)
+	if len(recOne) != 1 || recOne[0].Polecat != "furiosa" {
+		t.Errorf("targeting 'furiosa' should yield exactly furiosa, got %v", recOne)
 	}
 }
