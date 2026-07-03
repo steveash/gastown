@@ -329,6 +329,11 @@ ID is derivable from the branch name are auto-recovered; others are reported for
 manual handling (uncommitted changes must be committed first — use --force to
 recover clean commits anyway, ignoring the uncommitted remainder).
 
+Run this on DEAD/orphaned polecats. Re-slinging an issue whose polecat is still
+alive risks double-dispatch (two polecats submitting the same branch). The scan
+detects any unmerged branch and does not verify liveness — that check is the
+job of the Phase-2 witness auto-invoker.
+
 Examples:
   gt orphans recover                 # Recover all orphan branches in the current rig
   gt orphans recover furiosa         # Recover only polecat 'furiosa'
@@ -405,6 +410,14 @@ func runOrphansRecover(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Resubmitting %s (%s, %d commit(s) ahead)...\n",
 			style.Bold.Render("↻"), style.Bold.Render(info.Issue), b.Polecat, b.AheadCount)
 
+		// --force recovers the committed part only; uncommitted edits in the dead
+		// worktree are NOT carried onto the resumed branch. Surface that here so it
+		// is not silently lost (the branch was flagged recoverable only via --force).
+		if b.HasUncommitted {
+			fmt.Printf("  %s worktree had uncommitted changes — only committed work is recovered; uncommitted edits in %s are left behind\n",
+				style.Warning.Render("⚠"), b.WorktreePath)
+		}
+
 		// Reuse the tested resume path exactly as a human would run it.
 		slingCmd := exec.Command("gt", "sling", info.Issue, rigName, "--branch", b.Branch)
 		slingCmd.Dir = townRoot
@@ -422,6 +435,12 @@ func runOrphansRecover(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n%s Recovered %d, failed %d\n", style.Bold.Render("Summary:"), recovered, failed)
 	}
 	reportUnrecoverable(unrecoverable, skipped)
+	// Exit non-zero if any resubmission failed, so scripts and the Phase-2
+	// witness auto-invoker can detect a failed recovery rather than reading
+	// exit 0 as success.
+	if failed > 0 {
+		return fmt.Errorf("%d of %d recovery(ies) failed", failed, recovered+failed)
+	}
 	return nil
 }
 
