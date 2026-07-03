@@ -179,6 +179,13 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 		activeZombies := countActiveWorkZombies(zombieResult)
 		if activeZombies > 0 {
 			sendZombieNotification(router, rigName, zombieResult, activeZombies)
+			// esim-mku Phase 2: auto-recover committed-but-unsubmitted work of
+			// dead polecats (the crash-after-commit-before-`gt done` gap). Gated
+			// on --notify so it only runs in the production patrol, not ad-hoc
+			// scans. Best-effort: never fail the patrol on a recovery hiccup.
+			if patrolScanNotify {
+				autoRecoverZombies(townRoot, rigName, zombieResult)
+			}
 		}
 	}
 
@@ -241,6 +248,28 @@ func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
 		}
 	}
 	return count
+}
+
+// autoRecoverZombies reintegrates committed-but-unsubmitted work for each
+// dead active-work polecat the scan detected (esim-mku Phase 2). Best-effort:
+// resolves the rig, then delegates each polecat to autoRecoverDeadPolecat,
+// whose resubmit path is idempotent and double-dispatch safe. Outcomes are
+// logged to stderr so they land in the daemon log.
+func autoRecoverZombies(townRoot, rigName string, result *witness.DetectZombiePolecatsResult) {
+	_, r, err := getRig(rigName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "auto-recover: cannot resolve rig %s: %v\n", rigName, err)
+		return
+	}
+	defaultBranch := r.DefaultBranch()
+	for _, z := range result.Zombies {
+		if !z.WasActive {
+			continue
+		}
+		for _, line := range autoRecoverDeadPolecat(townRoot, r.Path, rigName, defaultBranch, z.PolecatName) {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
 }
 
 func sendZombieNotification(router *mail.Router, rigName string, result *witness.DetectZombiePolecatsResult, activeCount int) {

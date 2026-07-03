@@ -419,12 +419,10 @@ func runOrphansRecover(cmd *cobra.Command, args []string) error {
 		}
 
 		// Reuse the tested resume path exactly as a human would run it.
-		slingCmd := exec.Command("gt", "sling", info.Issue, rigName, "--branch", b.Branch)
-		slingCmd.Dir = townRoot
-		out, slingErr := slingCmd.CombinedOutput()
+		out, slingErr := resubmitOrphanBranch(townRoot, rigName, b)
 		if slingErr != nil {
 			failed++
-			fmt.Printf("  %s sling failed: %v\n%s\n", style.Warning.Render("✗"), slingErr, indentLines(string(out), "    "))
+			fmt.Printf("  %s sling failed: %v\n%s\n", style.Warning.Render("✗"), slingErr, indentLines(out, "    "))
 			continue
 		}
 		recovered++
@@ -442,6 +440,59 @@ func runOrphansRecover(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d of %d recovery(ies) failed", failed, recovered+failed)
 	}
 	return nil
+}
+
+// resubmitOrphanBranch resubmits one orphan branch to the merge queue via the
+// tested `gt sling --branch` resume path, returning sling's combined output.
+// Idempotency + double-dispatch safety come for free from sling's own guards:
+// a bead whose assignee session is DEAD is auto-force re-slung and the dead
+// polecat is unhooked; a bead held by a LIVE agent is refused; a closed bead is
+// refused. So repeated calls converge without double-dispatching.
+func resubmitOrphanBranch(townRoot, rigName string, b OrphanBranch) (string, error) {
+	info := parseBranchName(b.Branch)
+	slingCmd := exec.Command("gt", "sling", info.Issue, rigName, "--branch", b.Branch)
+	slingCmd.Dir = townRoot
+	out, err := slingCmd.CombinedOutput()
+	return string(out), err
+}
+
+// autoRecoverDeadPolecat attempts to reintegrate a single dead polecat's
+// committed-but-unsubmitted work (esim-mku Phase 2). It is called from the
+// witness patrol when an active-work zombie is detected. Only clean,
+// issue-parseable branches for the named polecat are resubmitted
+// (classifyOrphanBranches self-gates); the resubmit path (resubmitOrphanBranch
+// -> gt sling --branch) is idempotent and double-dispatch safe. Returns
+// human-readable log lines (empty when the polecat had no recoverable work).
+func autoRecoverDeadPolecat(townRoot, rigPath, rigName, defaultBranch, polecatName string) []string {
+	branches, _, err := findOrphanPolecatBranches(rigPath, rigName, defaultBranch)
+	if err != nil {
+		return []string{fmt.Sprintf("auto-recover %s: worktree scan failed: %v", polecatName, err)}
+	}
+	recoverable, _ := classifyOrphanBranches(branches, polecatName, false)
+	var logs []string
+	for _, b := range recoverable {
+		out, err := resubmitOrphanBranch(townRoot, rigName, b)
+		if err != nil {
+			// Not necessarily a real failure: sling refuses when the work is
+			// already held by a live agent (e.g. a prior recovery). Report it
+			// as a skip so the daemon log stays informative without alarming.
+			logs = append(logs, fmt.Sprintf("auto-recover %s (%s): skipped — %s", polecatName, b.Branch, firstNonEmptyLine(out, err.Error())))
+			continue
+		}
+		logs = append(logs, fmt.Sprintf("auto-recover %s (%s): resubmitted committed work to merge queue", polecatName, b.Branch))
+	}
+	return logs
+}
+
+// firstNonEmptyLine returns the first non-blank line of out, or fallback if out
+// has none — for compact single-line logging of a subprocess's output.
+func firstNonEmptyLine(out, fallback string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(ln); s != "" {
+			return s
+		}
+	}
+	return fallback
 }
 
 // classifyOrphanBranches splits detected orphan branches into those that can be
