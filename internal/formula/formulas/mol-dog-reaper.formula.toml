@@ -23,7 +23,7 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
-| alert_threshold | config | Open wisp count that triggers escalation (default 500) |
+| alert_threshold | config | Open wisp count that triggers escalation (default 2500) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
 | dolt_port | config | Dolt server port (default 3307) |
@@ -240,7 +240,7 @@ default = "168h"
 
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"
-default = "800"
+default = "2500"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"
